@@ -10777,6 +10777,7 @@
       <label>超时 <input type="number" id="cpbTo" value="10000" min="2000" step="1000"> ms</label>
       <label><input type="checkbox" id="cpbOnlyFail"> 只测失败项</label>
       <button type="button" class="btn btn-primary" id="cpbRun">🔍 批量测链式代理</button>
+      <button type="button" class="btn btn-secondary" id="cpbFixDollar">＋ 补全 $ 符号</button>
       <button type="button" class="btn btn-secondary" id="cpbStop" disabled>⏹ 停止</button>
       <button type="button" class="btn btn-danger" id="cpbPrune" disabled>🗑 删除无效节点</button>
       <button type="button" class="btn btn-secondary" id="cpbRestore" disabled>↩ 回滚删除</button>
@@ -10794,7 +10795,7 @@
     var m={JP:'日本',HK:'中国·港',TW:'中国·台',SG:'新加坡',MY:'马来西亚',TH:'泰国',ID:'印尼',IN:'印度',KR:'韩国',US:'美国',GB:'英国',DE:'德国',FR:'法国',NL:'荷兰',CA:'加拿大',AU:'澳大利亚',VN:'越南',PH:'菲律宾',LAX:'美西',NRT:'日本',TYO:'日本',KIX:'日本',SIN:'新加坡',HKG:'中国·港',LHR:'伦敦',FRA:'法兰克福',AMS:'阿姆斯特丹',YTO:'多伦多',MAD:'马德里',CPH:'哥本哈根',VIE:'维也纳',DUB:'都柏林',BCN:'巴塞罗那',SVO:'莫斯科',BOM:'孟买',SYD:'悉尼'};
     var c=String(code||'').toUpperCase(); return m[c]||code||'—';
   };
-  var CHAIN=/\$(socks5|http|https|turn|sstp):\/\/([^#\s]+)/i;
+  var CHAIN=/\$?(socks5|http|https|turn|sstp):\/\/([^#\s]+)/i; // $ 可选，容忍裸 proto://
   var state={rows:[],running:false,aborted:false,snapshot:null,current:null};
 
   function parseLine(line){
@@ -10922,6 +10923,24 @@
   $('cpbStop').onclick=stop;
   $('cpbPrune').onclick=prune;
   $('cpbRestore').onclick=restore;
+  $('cpbFixDollar').onclick=fixDollar;
+  // 补全 $ ：把 #customIPs 里每个 proto://（缺 $ 的）前补上 $，并去掉紧邻其前的一个空格。
+  // 结果： sstp://x → $sstp://x ;  disz.pages.dev#JP sstp://x → disz.pages.dev#JP$sstp://x
+  function fixDollar(){
+    var ta=$('customIPs'); if(!ta){ msg('未找到 #customIPs 文本框'); return; }
+    var lines=ta.value.split(/\r?\n/), fixed=0;
+    var out=lines.map(function(l){
+      if(!l.trim()) return l;
+      var nl=l.replace(/ ?(?<!\$)(https|http|socks5|turn|sstp):\/\//gi, function(m,p){ return '$'+p+'://'; });
+      if(nl!==l) fixed++;
+      return nl;
+    });
+    if(!fixed){ msg('没有需要补全 $ 的行（均已带 $proto:// 或无 proto://）'); return; }
+    ta.value=out.join('\n');
+    try{ ta.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+    if(typeof markModified==='function'){ try{ markModified('sub'); }catch(e){} }
+    msg('已补全 '+fixed+' 行 → $proto://（完整优选行 = 优选域名#备注$proto://creds；纯代理行补 $ 后如需按域优选，再在行首加 优选域名# ）');
+  }
   render();
 })();
 </script>
