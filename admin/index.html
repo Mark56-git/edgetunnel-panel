@@ -10564,7 +10564,369 @@
 				</div>
 			</div>
 
-			<!-- 模块3: 详细配置信息 -->
+			<!-- ============================================================
+  链式代理批量测试模块 (cpb) — 自包含，无依赖，vanilla JS
+  用法：把本文件内容整体贴进你自己的 admin.html 的 <body> 内
+        （建议放在"链式代理"卡片里；本模块自身带 div + script，不依赖其它 id）
+  仅调用现有 worker 端点：
+    GET  /admin/ADD.txt         读节点列表(自定义优选)
+    POST /admin/ADD.txt         回写节点列表(自动删无效)
+    GET  /admin/check?{proto}=  单节点测试(返回 success/ip/loc/responseTime)
+    GET  /admin/config.json     读完整配置
+    POST /admin/config.json     存回配置(设为当前/全局切换)
+  后端 0 改动。部署：把改好的 admin.html 托管到你自己的 CF Pages，
+        并把 _worker.js 第 4 行 Pages静态页面 指向你的站。
+============================================================ -->
+<div id="cpbRoot" style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:900px">
+  <h3 style="margin:0 0 8px">链式代理 · 批量测试 / 自动删无效 / 全局切换</h3>
+  <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
+    <label>并发 <input type="number" id="cpbConc" value="1" min="1" max="8" style="width:52px"></label>
+    <label>超时 <input type="number" id="cpbTo" value="10000" min="2000" step="1000" style="width:70px"> ms</label>
+    <label><input type="checkbox" id="cpbOnlyFail"> 只测失败项</label>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+    <button id="cpbRun" class="cpb-btn">批量测链式代理</button>
+    <button id="cpbStop" class="cpb-btn" disabled>停止</button>
+    <button id="cpbPrune" class="cpb-btn" disabled>删除无效节点</button>
+    <button id="cpbRestore" class="cpb-btn" disabled>回滚删除</button>
+    <span id="cpbMsg" style="align-self:center;font-size:13px;color:#666"></span>
+  </div>
+  <div style="overflow:auto;border:1px solid #e5e5e5;border-radius:8px">
+    <table id="cpbTable" style="border-collapse:collapse;width:100%;font-size:13px">
+      <thead><tr style="background:#fafafa">
+        <th style="p">名称</th><th style="p">协议</th><th style="p">延迟(ms)</th>
+        <th style="p">出口IP</th><th style="p">国家/地区</th><th style="p">状态</th>
+        <th style="p">操作</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+<style>
+#cpbRoot th.p,#cpbRoot td.p{padding:6px 8px;text-align:left;border-bottom:1px solid #f0f0f0;white-space:nowrap}
+#cpbRoot .cpb-btn{padding:6px 12px;border:1px solid #d0d0d0;background:#fff;border-radius:6px;cursor:pointer;font-size:13px}
+#cpbRoot .cpb-btn:disabled{opacity:.5;cursor:not-allowed}
+#cpbRoot tr.ok td:nth-child(6){color:#1a7f3b;font-weight:600}
+#cpbRoot tr.bad td:nth-child(6){color:#c0392b;font-weight:600}
+#cpbRoot tr.cur td{background:#fff7e6}
+</style>
+<script>
+(function(){
+  "use strict";
+  const $=(id)=>document.getElementById(id);
+  const msg=(t)=>{ const e=$('cpbMsg'); if(e) e.textContent=t||''; };
+  const locZh=(code)=>{ const m={JP:'日本',HK:'中国·港',TW:'中国·台',SG:'新加坡',MY:'马来西亚',TH:'泰国',ID:'印尼',IN:'印度',KR:'韩国',US:'美国',GB:'英国',DE:'德国',FR:'法国',NL:'荷兰',CA:'加拿大',AU:'澳大利亚',VN:'越南',PH:'菲律宾',LAX:'美西',SJC:'美西',SF:'美西',SEA:'美西',NRT:'日本',TYO:'日本',KIX:'日本',HND:'日本',SIN:'新加坡',HKG:'港',LHR:'伦敦',FRA:'法兰克福',AMS:'阿姆斯特丹',YTO:'多伦',SVO:'莫斯科',JNB:'约翰内斯堡',BOM:'孟买',SYD:'悉尼',MAD:'马德里',MXP:'米兰',WAW:'华沙',VIE:'维也纳',CPH:'哥本哈根',OSL:'奥斯陆',ARN:'斯德哥尔摩',ZRH:'苏黎世',GVA:'日内瓦',DUB:'都柏林',BCN:'巴塞罗那'}; const c=String(code||'').toUpperCase(); return m[c]||code||'—'; };
+
+  const state={ rows:[], running:false, aborted:false, snapshot:null, current:null, lastProto:undefined };
+
+  // 解析一行里的链式代理标记：$<proto>://<creds>
+  const CHAIN=/\$(socks5|http|https|turn|sstp):\/\/([^#\s]+)/i;
+  function parseLine(line){
+    const m=line.match(CHAIN);
+    if(!m) return null;
+    const name=(line.split('#')[0]||'').trim();
+    return { line, name, proto:m[1].toLowerCase(), creds:m[2].trim(), result:null };
+  }
+
+  // 取节点列表文本：优先用页面上的 #customIPs，否则 GET /admin/ADD.txt
+  async function loadListText(){
+    const ta=$('customIPs');
+    if(ta && ta.value && ta.value.trim() && ta.value!=='正在加载...') return ta.value;
+    const r=await fetch('/admin/ADD.txt?_t='+Date.now(),{headers:{'Cache-Control':'no-cache'}});
+    return r.ok ? await r.text() : '';
+  }
+
+  async function checkOne(node, timeoutMs){
+    const ctrl=new AbortController();
+    const timer=setTimeout(()=>ctrl.abort(), timeoutMs);
+    try{
+      const url='/admin/check?'+node.proto+'='+encodeURIComponent(node.creds)+'&_t='+Date.now();
+      const r=await fetch(url,{signal:ctrl.signal});
+      const j=await r.json();
+      node.result=j; // {success, proxy, ip, loc, responseTime}
+    }catch(e){
+      node.result={ success:false, error:(e.name==='AbortError')?'超时':(e.message||'连接失败') };
+    }finally{ clearTimeout(timer); }
+  }
+
+  function render(){
+    const tb=$('cpbTable').querySelector('tbody');
+    tb.innerHTML='';
+    state.rows.forEach((n,idx)=>{
+      const tr=document.createElement('tr');
+      const r=n.result;
+      const ok=r && r.success===true;
+      tr.className=ok?'ok':'bad';
+      if(n.line===state.current) tr.classList.add('cur');
+      const cells=[ n.name||n.line, n.proto, ok? (r.responseTime??'—') : '—',
+                    ok? (r.ip||'—') : '—', ok? locZh(r.loc) : '—',
+                    ok? '可用' : ('失效'+(r&&r.error?' · '+r.error:'')) ];
+      cells.forEach(c=>{ const td=document.createElement('td'); td.className='p'; td.textContent=c; tr.appendChild(td); });
+      const op=document.createElement('td'); op.className='p';
+      const btn=document.createElement('button'); btn.className='cpb-btn';
+      btn.textContent='设为当前(全局)';
+      btn.disabled=!ok;
+      btn.onclick=()=>setCurrent(n);
+      op.appendChild(btn); tr.appendChild(op);
+      tb.appendChild(tr);
+    });
+    $('cpbPrune').disabled = state.rows.length===0 || !state.rows.some(n=>n.result&&n.result.success===false);
+  }
+
+  async function run(){
+    if(state.running) return;
+    state.running=true; state.aborted=false; state.rows=[];
+    $('cpbRun').disabled=true; $('cpbStop').disabled=false; msg('读取节点列表…');
+    let text='';
+    try{ text=await loadListText(); }catch(e){ msg('读取节点列表失败: '+e.message); state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true; return; }
+    let lines=text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+    let nodes=lines.map(parseLine).filter(Boolean);
+    if($('cpbOnlyFail')&&$('cpbOnlyFail').checked){ /* 无历史结果时忽略 */ }
+    if(!nodes.length){ msg('未在列表中解析到 $proto:// 链式代理节点'); state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true; render(); return; }
+    state.rows=nodes;
+    const conc=Math.max(1,Math.min(8,parseInt($('cpbConc').value,10)||1));
+    const timeoutMs=Math.max(2000,parseInt($('cpbTo').value,10)||10000);
+    let i=0, done=0;
+    async function worker(){
+      while(i<nodes.length && !state.aborted){
+        const n=nodes[i++];
+        await checkOne(n, timeoutMs);
+        done++; render(); msg(`正在测试 ${done}/${nodes.length}`);
+      }
+    }
+    const pool=[]; for(let k=0;k<conc;k++) pool.push(worker());
+    await Promise.all(pool);
+    state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true;
+    msg(state.aborted?'已停止':'完成');
+    render();
+  }
+
+  function stop(){ state.aborted=true; msg('正在停止…'); }
+
+  // 自动删无效：只删"带 $proto:// 且测试失败"的行；保留普通优选行与其它行
+  async function prune(){
+    const failLines=new Set(state.rows.filter(n=>n.result&&n.result.success===false).map(n=>n.line));
+    if(!failLines.size){ msg('没有可删除的失效节点'); return; }
+    if(!confirm(`将删除 ${failLines.size} 个失效链式代理行（普通优选行保留），确定？`)) return;
+    const text=await loadListText();
+    if(!state.snapshot) state.snapshot=text; // 记快照供回滚
+    const kept=text.split(/\r?\n/).filter(l=>{ const t=l.trim(); if(!t) return true; const p=parseLine(t); return !(p && failLines.has(l.trim())); });
+    const newtext=kept.join('\n');
+    const r=await fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:newtext});
+    if(r.ok){ msg('已删除 '+failLines.size+' 个失效节点'); $('cpbRestore').disabled=false; if($('customIPs')) $('customIPs').value=newtext; }
+    else msg('删除失败: '+(r.status));
+  }
+
+  async function restore(){
+    if(!state.snapshot){ msg('无可回滚快照'); return; }
+    const r=await fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:state.snapshot});
+    if(r.ok){ msg('已回滚到删除前'); if($('customIPs')) $('customIPs').value=state.snapshot; }
+    else msg('回滚失败: '+(r.status));
+  }
+
+  // 设为当前/全局切换：读 config.json，只改 .反代.SOCKS5(账号/全局/启用)，其余原样存回
+  async function setCurrent(node){
+    try{
+      const cfg=await (await fetch('/admin/config.json?_t='+Date.now())).json();
+      cfg['反代']=cfg['反代']||{};
+      cfg['反代']['SOCKS5']=cfg['反代']['SOCKS5']||{};
+      const s=cfg['反代']['SOCKS5'];
+      s['启用']=node.proto; // 协议字符串：'sstp'/'socks5'/'http'/'https'/'turn'
+      s['账号']=node.creds; // 例如 vpn:vpn@public-vpn-78.opengw.net:443
+      s['全局']=true;       // 启用全局：非CF站点也走该上游
+      state.current=node.line;
+      const r=await fetch('/admin/config.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+      if(r.ok){ msg('已设为当前全局代理: '+node.name); render(); }
+      else msg('切换失败: '+(r.status));
+    }catch(e){ msg('切换失败: '+e.message); }
+  }
+
+  $('cpbRun').onclick=run;
+  $('cpbStop').onclick=stop;
+  $('cpbPrune').onclick=prune;
+  $('cpbRestore').onclick=restore;
+  render();
+})();
+</script>
+<!-- ============================================================
+  链式代理批量测试模块 (cpb) v2 — 原生 .module 卡片，贴合面板设计
+  插入位置：.card-container 内、“模块3: 详细配置信息”注释之前
+  复用面板类名：.module / .module-title / .module-content / .btn /
+              .network-cards-container / .network-card / .status-indicator
+  仅用现有 worker 端点，后端 0 改。
+============================================================ -->
+<style>
+/* 只作用在 #cpbModule 内，尽量不污染全局 */
+#cpbModule .cpb-controls{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:2px 0 10px;font-size:13px;color:var(--text-secondary,#555)}
+#cpbModule .cpb-controls label{display:inline-flex;align-items:center;gap:6px}
+#cpbModule .cpb-controls input[type=number]{width:58px;padding:4px 8px;border:1px solid var(--border-color,#d0d0d0);border-radius:8px;background:var(--input-bg,#fff);color:var(--text-primary,#111)}
+#cpbModule .cpb-controls input[type=checkbox]{margin-right:2px}
+#cpbModule .cpb-msg{font-size:13px;color:var(--text-secondary,#888);min-height:18px;margin:0 0 10px;line-height:1.5}
+#cpbModule .cpb-node-actions{margin-top:10px}
+#cpbModule .cpb-node-actions .btn{font-size:12px;padding:5px 12px}
+#cpbModule .cpb-empty{padding:22px;text-align:center;color:var(--text-secondary,#999);font-size:13px;grid-column:1/-1}
+</style>
+<div class="module chain-proxy-batch" id="cpbModule">
+  <div class="module-title" onclick="toggleModule(this)">
+    ⛓️ 链式代理 · 批量测试 / 自动删无效
+    <svg class="collapse-icon" viewBox="0 0 24 24" style="transform:rotate(90deg);"><path d="M7 10l5 5 5-5z"/></svg>
+  </div>
+  <div class="module-content">
+    <div class="cpb-controls">
+      <label>并发 <input type="number" id="cpbConc" value="1" min="1" max="8"></label>
+      <label>超时 <input type="number" id="cpbTo" value="10000" min="2000" step="1000"> ms</label>
+      <label><input type="checkbox" id="cpbOnlyFail"> 只测失败项</label>
+      <button type="button" class="btn btn-primary" id="cpbRun">🔍 批量测链式代理</button>
+      <button type="button" class="btn btn-secondary" id="cpbStop" disabled>⏹ 停止</button>
+      <button type="button" class="btn btn-danger" id="cpbPrune" disabled>🗑 删除无效节点</button>
+      <button type="button" class="btn btn-secondary" id="cpbRestore" disabled>↩ 回滚删除</button>
+    </div>
+    <div id="cpbMsg" class="cpb-msg">尚未测试。节点来源＝「自定义优选」文本框（#customIPs）里带 <code>$proto://</code> 的链式代理行。</div>
+    <div id="cpbList" class="network-cards-container"><div class="cpb-empty">点「批量测链式代理」开始；结果按网络卡片显示：延迟 / 出口IP / 国家地区 / 状态。</div></div>
+  </div>
+</div>
+<script>
+(function(){
+  "use strict";
+  var $ = function(id){ return document.getElementById(id); };
+  var msg = function(t){ var e=$('cpbMsg'); if(e) e.textContent = t||''; };
+  var locZh = function(code){
+    var m={JP:'日本',HK:'中国·港',TW:'中国·台',SG:'新加坡',MY:'马来西亚',TH:'泰国',ID:'印尼',IN:'印度',KR:'韩国',US:'美国',GB:'英国',DE:'德国',FR:'法国',NL:'荷兰',CA:'加拿大',AU:'澳大利亚',VN:'越南',PH:'菲律宾',LAX:'美西',NRT:'日本',TYO:'日本',KIX:'日本',SIN:'新加坡',HKG:'中国·港',LHR:'伦敦',FRA:'法兰克福',AMS:'阿姆斯特丹',YTO:'多伦多',MAD:'马德里',CPH:'哥本哈根',VIE:'维也纳',DUB:'都柏林',BCN:'巴塞罗那',SVO:'莫斯科',BOM:'孟买',SYD:'悉尼'};
+    var c=String(code||'').toUpperCase(); return m[c]||code||'—';
+  };
+  var CHAIN=/\$(socks5|http|https|turn|sstp):\/\/([^#\s]+)/i;
+  var state={rows:[],running:false,aborted:false,snapshot:null,current:null};
+
+  function parseLine(line){
+    var m=String(line).match(CHAIN); if(!m) return null;
+    var name=(String(line).split('#')[0]||'').trim();
+    return {line:String(line).trim(),name:name,proto:m[1].toLowerCase(),creds:m[2].trim(),result:null};
+  }
+  async function loadListText(){
+    var ta=$('customIPs');
+    if(ta && ta.value && ta.value.trim() && ta.value!=='正在加载...') return ta.value;
+    var r=await fetch('/admin/ADD.txt?_t='+Date.now(),{headers:{'Cache-Control':'no-cache'}});
+    return r.ok ? await r.text() : '';
+  }
+  async function checkOne(node,timeoutMs){
+    var ctrl=new AbortController();
+    var timer=setTimeout(function(){ctrl.abort();},timeoutMs);
+    try{
+      var url='/admin/check?'+node.proto+'='+encodeURIComponent(node.creds)+'&_t='+Date.now();
+      var r=await fetch(url,{signal:ctrl.signal});
+      node.result=await r.json();
+    }catch(e){
+      node.result={success:false,error:(e.name==='AbortError')?'超时':(e.message||'连接失败')};
+    }finally{ clearTimeout(timer); }
+  }
+  function cardEl(node){
+    var r=node.result; var ok=r&&r.success===true;
+    var card=document.createElement('div'); card.className='network-card';
+    var title=document.createElement('div'); title.className='network-card-title';
+    var dot=document.createElement('span'); dot.className='status-indicator';
+    dot.style.background=(r===null)?'var(--text-secondary,#bbb)':(ok?'#22c55e':'#ef4444');
+    var tt=document.createElement('div'); tt.className='title-text';
+    var tm=document.createElement('div'); tm.className='title-main'; tm.textContent=(node.name||node.proto||(r&&r.loc?locZh(r.loc):'未测'));
+    var ts=document.createElement('div'); ts.className='title-subtitle';
+    ts.textContent=node.proto+(node.name&&node.name!==ts.textContent?' · '+node.name:'')+' 链式代理';
+    tt.appendChild(tm); tt.appendChild(ts); title.appendChild(dot); title.appendChild(tt); card.appendChild(title);
+    var info=document.createElement('div'); info.className='network-info-content';
+    var ipt=document.createElement('span'); ipt.className='ip-text';
+    ipt.textContent=(r===null)?'未测试':(ok?('延迟 '+ (r.responseTime!=null?r.responseTime+'ms':'—')):'不可用');
+    var lc=document.createElement('div'); lc.className='location-text';
+    var ct=document.createElement('span'); ct.className='country-text';
+    if(r===null){ ct.textContent='点批量测'; }
+    else if(ok){ ct.textContent=(locZh(r.loc)+' · 出口IP '+(r.ip||'—')); }
+    else { ct.textContent=(r.error?('失败 · '+r.error):'失败'); }
+    lc.appendChild(ct); info.appendChild(ipt); info.appendChild(lc); card.appendChild(info);
+    if(ok){
+      var act=document.createElement('div'); act.className='cpb-node-actions';
+      var b=document.createElement('button'); b.type='button'; b.className='btn btn-primary'; b.textContent='设为当前(全局)';
+      b.onclick=function(){ setCurrent(node); };
+      act.appendChild(b); card.appendChild(act);
+    }
+    return card;
+  }
+  function render(){
+    var list=$('cpbList'); if(!list) return;
+    list.innerHTML='';
+    if(!state.rows.length){
+      var e=document.createElement('div'); e.className='cpb-empty';
+      e.textContent='点「批量测链式代理」开始；结果按网络卡片显示：延迟 / 出口IP / 国家地区 / 状态。';
+      list.appendChild(e);
+    } else {
+      state.rows.forEach(function(n){ list.appendChild(cardEl(n)); });
+    }
+    var anyFail=state.rows.some(function(n){return n.result&&n.result.success===false;});
+    $('cpbPrune').disabled = !anyFail;
+  }
+  async function run(){
+    if(state.running) return;
+    state.running=true; state.aborted=false;
+    $('cpbRun').disabled=true; $('cpbStop').disabled=false; msg('读取节点列表…');
+    var text='';
+    try{ text=await loadListText(); }
+    catch(e){ msg('读取节点列表失败: '+e.message); state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true; return; }
+    var nodes=text.split(/\r?\n/).map(parseLine).filter(Boolean);
+    if(!nodes.length){ msg('未在 #customIPs 里解析到 $proto:// 链式代理节点。'); state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true; render(); return; }
+    state.rows=nodes;
+    var conc=Math.max(1,Math.min(8,parseInt($('cpbConc').value,10)||1));
+    var timeoutMs=Math.max(2000,parseInt($('cpbTo').value,10)||10000);
+    var i=0,done=0;
+    async function worker(){
+      while(i<nodes.length && !state.aborted){
+        var n=nodes[i++];
+        await checkOne(n,timeoutMs);
+        done++; render(); msg('正在测试 '+done+'/'+nodes.length);
+      }
+    }
+    var pool=[]; for(var k=0;k<conc;k++) pool.push(worker());
+    await Promise.all(pool);
+    state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true;
+    msg(state.aborted?'已停止':'完成');
+    render();
+  }
+  function stop(){ state.aborted=true; msg('正在停止…'); }
+  async function prune(){
+    var fail=new Set(); state.rows.forEach(function(n){ if(n.result&&n.result.success===false) fail.add(n.line); });
+    if(!fail.size){ msg('没有可删除的失效节点'); return; }
+    if(!confirm('将删除 '+fail.size+' 个失效链式代理行（普通优选行保留），确定？')) return;
+    var text=await loadListText();
+    if(!state.snapshot) state.snapshot=text;
+    var kept=text.split(/\r?\n/).filter(function(l){ var t=l.trim(); if(!t) return true; var p=parseLine(t); return !(p&&fail.has(t)); });
+    var newtext=kept.join('\n');
+    var r=await fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:newtext});
+    if(r.ok){ msg('已删除 '+fail.size+' 个失效节点'); $('cpbRestore').disabled=false; if($('customIPs')) $('customIPs').value=newtext; render(); }
+    else msg('删除失败: '+(r.status));
+  }
+  async function restore(){
+    if(!state.snapshot){ msg('无可回滚快照'); return; }
+    var r=await fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:state.snapshot});
+    if(r.ok){ msg('已回滚到删除前'); if($('customIPs')) $('customIPs').value=state.snapshot; }
+    else msg('回滚失败: '+(r.status));
+  }
+  async function setCurrent(node){
+    try{
+      var cfg=await (await fetch('/admin/config.json?_t='+Date.now())).json();
+      cfg['反代']=cfg['反代']||{};
+      cfg['反代']['SOCKS5']=cfg['反代']['SOCKS5']||{};
+      var s=cfg['反代']['SOCKS5'];
+      s['启用']=node.proto; s['账号']=node.creds; s['全局']=true;
+      state.current=node.line;
+      var r=await fetch('/admin/config.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+      if(r.ok){ msg('已设为当前全局代理: '+(node.name||node.creds)); render(); }
+      else msg('切换失败: '+(r.status));
+    }catch(e){ msg('切换失败: '+e.message); }
+  }
+  $('cpbRun').onclick=run;
+  $('cpbStop').onclick=stop;
+  $('cpbPrune').onclick=prune;
+  $('cpbRestore').onclick=restore;
+  render();
+})();
+</script>
+
+<!-- 模块3: 详细配置信息 -->
 			<div class="module collapsed advanced-module mode-always-visible">
 				<div class="module-title" onclick="toggleModule(this)">
 					⚙️ 详细配置信息
@@ -28818,192 +29180,6 @@
 		}
 
 	</script>
-
-<!-- ============================================================
-  链式代理批量测试模块 (cpb) — 自包含，无依赖，vanilla JS
-  用法：把本文件内容整体贴进你自己的 admin.html 的 <body> 内
-        （建议放在"链式代理"卡片里；本模块自身带 div + script，不依赖其它 id）
-  仅调用现有 worker 端点：
-    GET  /admin/ADD.txt         读节点列表(自定义优选)
-    POST /admin/ADD.txt         回写节点列表(自动删无效)
-    GET  /admin/check?{proto}=  单节点测试(返回 success/ip/loc/responseTime)
-    GET  /admin/config.json     读完整配置
-    POST /admin/config.json     存回配置(设为当前/全局切换)
-  后端 0 改动。部署：把改好的 admin.html 托管到你自己的 CF Pages，
-        并把 _worker.js 第 4 行 Pages静态页面 指向你的站。
-============================================================ -->
-<div id="cpbRoot" style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:900px">
-  <h3 style="margin:0 0 8px">链式代理 · 批量测试 / 自动删无效 / 全局切换</h3>
-  <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
-    <label>并发 <input type="number" id="cpbConc" value="1" min="1" max="8" style="width:52px"></label>
-    <label>超时 <input type="number" id="cpbTo" value="10000" min="2000" step="1000" style="width:70px"> ms</label>
-    <label><input type="checkbox" id="cpbOnlyFail"> 只测失败项</label>
-  </div>
-  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-    <button id="cpbRun" class="cpb-btn">批量测链式代理</button>
-    <button id="cpbStop" class="cpb-btn" disabled>停止</button>
-    <button id="cpbPrune" class="cpb-btn" disabled>删除无效节点</button>
-    <button id="cpbRestore" class="cpb-btn" disabled>回滚删除</button>
-    <span id="cpbMsg" style="align-self:center;font-size:13px;color:#666"></span>
-  </div>
-  <div style="overflow:auto;border:1px solid #e5e5e5;border-radius:8px">
-    <table id="cpbTable" style="border-collapse:collapse;width:100%;font-size:13px">
-      <thead><tr style="background:#fafafa">
-        <th style="p">名称</th><th style="p">协议</th><th style="p">延迟(ms)</th>
-        <th style="p">出口IP</th><th style="p">国家/地区</th><th style="p">状态</th>
-        <th style="p">操作</th>
-      </tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
-</div>
-<style>
-#cpbRoot th.p,#cpbRoot td.p{padding:6px 8px;text-align:left;border-bottom:1px solid #f0f0f0;white-space:nowrap}
-#cpbRoot .cpb-btn{padding:6px 12px;border:1px solid #d0d0d0;background:#fff;border-radius:6px;cursor:pointer;font-size:13px}
-#cpbRoot .cpb-btn:disabled{opacity:.5;cursor:not-allowed}
-#cpbRoot tr.ok td:nth-child(6){color:#1a7f3b;font-weight:600}
-#cpbRoot tr.bad td:nth-child(6){color:#c0392b;font-weight:600}
-#cpbRoot tr.cur td{background:#fff7e6}
-</style>
-<script>
-(function(){
-  "use strict";
-  const $=(id)=>document.getElementById(id);
-  const msg=(t)=>{ const e=$('cpbMsg'); if(e) e.textContent=t||''; };
-  const locZh=(code)=>{ const m={JP:'日本',HK:'中国·港',TW:'中国·台',SG:'新加坡',MY:'马来西亚',TH:'泰国',ID:'印尼',IN:'印度',KR:'韩国',US:'美国',GB:'英国',DE:'德国',FR:'法国',NL:'荷兰',CA:'加拿大',AU:'澳大利亚',VN:'越南',PH:'菲律宾',LAX:'美西',SJC:'美西',SF:'美西',SEA:'美西',NRT:'日本',TYO:'日本',KIX:'日本',HND:'日本',SIN:'新加坡',HKG:'港',LHR:'伦敦',FRA:'法兰克福',AMS:'阿姆斯特丹',YTO:'多伦',SVO:'莫斯科',JNB:'约翰内斯堡',BOM:'孟买',SYD:'悉尼',MAD:'马德里',MXP:'米兰',WAW:'华沙',VIE:'维也纳',CPH:'哥本哈根',OSL:'奥斯陆',ARN:'斯德哥尔摩',ZRH:'苏黎世',GVA:'日内瓦',DUB:'都柏林',BCN:'巴塞罗那'}; const c=String(code||'').toUpperCase(); return m[c]||code||'—'; };
-
-  const state={ rows:[], running:false, aborted:false, snapshot:null, current:null, lastProto:undefined };
-
-  // 解析一行里的链式代理标记：$<proto>://<creds>
-  const CHAIN=/\$(socks5|http|https|turn|sstp):\/\/([^#\s]+)/i;
-  function parseLine(line){
-    const m=line.match(CHAIN);
-    if(!m) return null;
-    const name=(line.split('#')[0]||'').trim();
-    return { line, name, proto:m[1].toLowerCase(), creds:m[2].trim(), result:null };
-  }
-
-  // 取节点列表文本：优先用页面上的 #customIPs，否则 GET /admin/ADD.txt
-  async function loadListText(){
-    const ta=$('customIPs');
-    if(ta && ta.value && ta.value.trim() && ta.value!=='正在加载...') return ta.value;
-    const r=await fetch('/admin/ADD.txt?_t='+Date.now(),{headers:{'Cache-Control':'no-cache'}});
-    return r.ok ? await r.text() : '';
-  }
-
-  async function checkOne(node, timeoutMs){
-    const ctrl=new AbortController();
-    const timer=setTimeout(()=>ctrl.abort(), timeoutMs);
-    try{
-      const url='/admin/check?'+node.proto+'='+encodeURIComponent(node.creds)+'&_t='+Date.now();
-      const r=await fetch(url,{signal:ctrl.signal});
-      const j=await r.json();
-      node.result=j; // {success, proxy, ip, loc, responseTime}
-    }catch(e){
-      node.result={ success:false, error:(e.name==='AbortError')?'超时':(e.message||'连接失败') };
-    }finally{ clearTimeout(timer); }
-  }
-
-  function render(){
-    const tb=$('cpbTable').querySelector('tbody');
-    tb.innerHTML='';
-    state.rows.forEach((n,idx)=>{
-      const tr=document.createElement('tr');
-      const r=n.result;
-      const ok=r && r.success===true;
-      tr.className=ok?'ok':'bad';
-      if(n.line===state.current) tr.classList.add('cur');
-      const cells=[ n.name||n.line, n.proto, ok? (r.responseTime??'—') : '—',
-                    ok? (r.ip||'—') : '—', ok? locZh(r.loc) : '—',
-                    ok? '可用' : ('失效'+(r&&r.error?' · '+r.error:'')) ];
-      cells.forEach(c=>{ const td=document.createElement('td'); td.className='p'; td.textContent=c; tr.appendChild(td); });
-      const op=document.createElement('td'); op.className='p';
-      const btn=document.createElement('button'); btn.className='cpb-btn';
-      btn.textContent='设为当前(全局)';
-      btn.disabled=!ok;
-      btn.onclick=()=>setCurrent(n);
-      op.appendChild(btn); tr.appendChild(op);
-      tb.appendChild(tr);
-    });
-    $('cpbPrune').disabled = state.rows.length===0 || !state.rows.some(n=>n.result&&n.result.success===false);
-  }
-
-  async function run(){
-    if(state.running) return;
-    state.running=true; state.aborted=false; state.rows=[];
-    $('cpbRun').disabled=true; $('cpbStop').disabled=false; msg('读取节点列表…');
-    let text='';
-    try{ text=await loadListText(); }catch(e){ msg('读取节点列表失败: '+e.message); state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true; return; }
-    let lines=text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
-    let nodes=lines.map(parseLine).filter(Boolean);
-    if($('cpbOnlyFail')&&$('cpbOnlyFail').checked){ /* 无历史结果时忽略 */ }
-    if(!nodes.length){ msg('未在列表中解析到 $proto:// 链式代理节点'); state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true; render(); return; }
-    state.rows=nodes;
-    const conc=Math.max(1,Math.min(8,parseInt($('cpbConc').value,10)||1));
-    const timeoutMs=Math.max(2000,parseInt($('cpbTo').value,10)||10000);
-    let i=0, done=0;
-    async function worker(){
-      while(i<nodes.length && !state.aborted){
-        const n=nodes[i++];
-        await checkOne(n, timeoutMs);
-        done++; render(); msg(`正在测试 ${done}/${nodes.length}`);
-      }
-    }
-    const pool=[]; for(let k=0;k<conc;k++) pool.push(worker());
-    await Promise.all(pool);
-    state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true;
-    msg(state.aborted?'已停止':'完成');
-    render();
-  }
-
-  function stop(){ state.aborted=true; msg('正在停止…'); }
-
-  // 自动删无效：只删"带 $proto:// 且测试失败"的行；保留普通优选行与其它行
-  async function prune(){
-    const failLines=new Set(state.rows.filter(n=>n.result&&n.result.success===false).map(n=>n.line));
-    if(!failLines.size){ msg('没有可删除的失效节点'); return; }
-    if(!confirm(`将删除 ${failLines.size} 个失效链式代理行（普通优选行保留），确定？`)) return;
-    const text=await loadListText();
-    if(!state.snapshot) state.snapshot=text; // 记快照供回滚
-    const kept=text.split(/\r?\n/).filter(l=>{ const t=l.trim(); if(!t) return true; const p=parseLine(t); return !(p && failLines.has(l.trim())); });
-    const newtext=kept.join('\n');
-    const r=await fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:newtext});
-    if(r.ok){ msg('已删除 '+failLines.size+' 个失效节点'); $('cpbRestore').disabled=false; if($('customIPs')) $('customIPs').value=newtext; }
-    else msg('删除失败: '+(r.status));
-  }
-
-  async function restore(){
-    if(!state.snapshot){ msg('无可回滚快照'); return; }
-    const r=await fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:state.snapshot});
-    if(r.ok){ msg('已回滚到删除前'); if($('customIPs')) $('customIPs').value=state.snapshot; }
-    else msg('回滚失败: '+(r.status));
-  }
-
-  // 设为当前/全局切换：读 config.json，只改 .反代.SOCKS5(账号/全局/启用)，其余原样存回
-  async function setCurrent(node){
-    try{
-      const cfg=await (await fetch('/admin/config.json?_t='+Date.now())).json();
-      cfg['反代']=cfg['反代']||{};
-      cfg['反代']['SOCKS5']=cfg['反代']['SOCKS5']||{};
-      const s=cfg['反代']['SOCKS5'];
-      s['启用']=node.proto; // 协议字符串：'sstp'/'socks5'/'http'/'https'/'turn'
-      s['账号']=node.creds; // 例如 vpn:vpn@public-vpn-78.opengw.net:443
-      s['全局']=true;       // 启用全局：非CF站点也走该上游
-      state.current=node.line;
-      const r=await fetch('/admin/config.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
-      if(r.ok){ msg('已设为当前全局代理: '+node.name); render(); }
-      else msg('切换失败: '+(r.status));
-    }catch(e){ msg('切换失败: '+e.message); }
-  }
-
-  $('cpbRun').onclick=run;
-  $('cpbStop').onclick=stop;
-  $('cpbPrune').onclick=prune;
-  $('cpbRestore').onclick=restore;
-  render();
-})();
-</script>
-
 </body>
 
 </html>
