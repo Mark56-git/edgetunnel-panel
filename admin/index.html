@@ -10710,14 +10710,20 @@
   }
   function stop(){state.aborted=true;}
 
-  function prune(){var fail={};state.rows.forEach(function(n){if(n.result&&n.result.success===false)fail[n.line]=1;});var cnt=Object.keys(fail).length;if(!cnt){msg('没有失效节点可删');return;}
-    if(!confirm('删除 '+cnt+' 个失效链式代理行（普通优选行保留）？'))return;
+  function prune(){var fail={};state.rows.forEach(function(n){if(n.result&&n.result.success===false)fail[n.proto+'|'+n.creds]=1;});var cnt=Object.keys(fail).length;if(!cnt){msg('没有失效节点可删');return;}
     loadListText().then(function(text){if(!state.snapshot)state.snapshot=text;
-      var kept=text.split(/\r?\n/).filter(function(l){var t=l.trim();if(!t)return true;var p=parseLine(t);return!(p&&fail[t]);});
+      var lines=text.split(/\r?\n/);var chainLines=0,wouldDel=0;
+      lines.forEach(function(l){var q=l.trim();if(!q)return;var p=parseLine(q);if(p){chainLines++;if(fail[p.proto+'|'+p.creds])wouldDel++;}});
+      var allFailed=(chainLines>0&&wouldDel>=chainLines);
+      var question=allFailed?('⚠️ 全部 '+chainLines+' 个节点都失效（多半没接 worker 或全挂）。确认要删除全部 '+wouldDel+' 行？')
+                            :('删除 '+wouldDel+' 个失效链式代理行（普通优选行保留）？');
+      if(!confirm(question))return;
+      var kept=text.split(/\r?\n/).filter(function(l){var q=l.trim();if(!q)return true;var p=parseLine(q);return!(p&&fail[p.proto+'|'+p.creds]);});
       var newtext=kept.join('\n');
-      fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:newtext}).then(function(r){if(r.ok){msg('已删除 '+cnt+' 个失效节点');if($('cpbRestore'))$('cpbRestore').disabled=false;var ta=$('customIPs');if(ta)ta.value=newtext;state.rows=[];renderList();if($('cpbAuto')&&$('cpbAuto').checked&&!state.running)run();}else{msg('删除失败: '+r.status);}});});
+      fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:newtext}).then(function(r){if(r.ok){var keptN=kept.filter(function(x){return x.trim();}).length;msg('已删除 '+wouldDel+' 个失效节点（保留 '+keptN+' 行）');if($('cpbRestore'))$('cpbRestore').disabled=false;var ta=$('customIPs');if(ta)ta.value=newtext;state.rows=[];renderList();if($('cpbAuto')&&$('cpbAuto').checked&&!state.running)run();}else{msg('删除失败: '+r.status);}});
+    });
   }
-  function restore(){if(!state.snapshot){msg('无可回滚快照');return;}
+function restore(){if(!state.snapshot){msg('无可回滚快照');return;}
     fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:state.snapshot}).then(function(r){if(r.ok){msg('已回滚到删除前');var ta=$('customIPs');if(ta)ta.value=state.snapshot;}else{msg('回滚失败: '+r.status);}});
   }
   function saveGlobal(){var r=document.querySelector('input[name=cpbPick]:checked');if(!r){msg('先勾选一个「可用」节点');return;}var node=state.rows[+r.dataset.i];
