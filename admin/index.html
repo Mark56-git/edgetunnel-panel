@@ -10944,6 +10944,274 @@
   render();
 })();
 </script>
+<!-- ============================================================
+  链式代理批量测试模块 (cpb) v3 — 原生 .module 卡片，贴合面板设计
+  插入位置：.card-container 内、“模块3: 详细配置信息”注释之前
+  功能：批量测(admin/check) / 侧栏结果(延迟·出口IP·国家·状态) /
+        自动删无效(回写 ADD.txt+快照回滚) / 勾选节点保存为全局代理 /
+        补全 $ 符号(可选用运行时 window.location.hostname 补优选域名前缀)
+  复用面板类名：.module/.module-title/.module-content/.btn/.network-card/.status-indicator
+  仅用现有 worker 端点：/admin/check /admin/ADD.txt(GET,POST) /admin/config.json(GET,POST)
+  后端 0 改。
+============================================================ -->
+<style>
+#cpbModule .cpb-controls{display:flex;flex-wrap:wrap;gap:12px 14px;align-items:center;margin:2px 0 10px;font-size:13px;color:var(--text-secondary,#555)}
+#cpbModule .cpb-controls label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+#cpbModule .cpb-controls input[type=number]{width:58px;padding:4px 8px;border:1px solid var(--border-color,#d0d0d0);border-radius:8px;background:var(--input-bg,#fff);color:var(--text-primary,#111)}
+#cpbModule .cpb-msg{font-size:13px;color:var(--text-secondary,#888);min-height:18px;margin:0 0 10px;line-height:1.55}
+#cpbModule .cpb-node-foot{margin-top:10px;display:flex;align-items:center;gap:8px}
+#cpbModule .cpb-pickwrap{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary,#666);cursor:pointer}
+#cpbModule .cpb-note{font-size:13px;color:var(--text-secondary,#888);margin-top:10px;line-height:1.55}
+#cpbModule .cpb-empty{padding:22px;text-align:center;color:var(--text-secondary,#999);font-size:13px;grid-column:1/-1}
+#cpbDollarList{position:fixed;z-index:99999;min-width:150px;background:var(--bg-card,#fff);color:var(--text-primary,#111);border:1px solid var(--border-color,#ddd);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.14);font-size:13px;overflow:hidden}
+#cpbDollarList[hidden]{display:none}
+#cpbDollarList .cpb-dollar-item{padding:7px 12px;cursor:pointer;font-family:ui-monospace,monospace}
+#cpbDollarList .cpb-dollar-item:hover{background:var(--hover-bg,#f3f3f3)}
+#cpbDollarList .cpb-dollar-item.cpb-dollar-sel{background:#e8f0fe;color:#1a56db}
+</style>
+<div class="module chain-proxy-batch" id="cpbModule">
+  <div class="module-title" onclick="toggleModule(this)">
+    ⛓️ 链式代理 · 批量测试 / 自动删无效 / 全局切换
+    <svg class="collapse-icon" viewBox="0 0 24 24" style="transform:rotate(90deg);"><path d="M7 10l5 5 5-5z"/></svg>
+  </div>
+  <div class="module-content">
+    <div class="cpb-controls">
+      <label>并发 <input type="number" id="cpbConc" value="1" min="1" max="8"></label>
+      <label>超时 <input type="number" id="cpbTo" value="10000" min="2000" step="1000"> ms</label>
+      <label><input type="checkbox" id="cpbOnlyFail"> 只测失败项</label>
+      <button type="button" class="btn btn-primary" id="cpbRun">🔍 批量测链式代理</button>
+      <button type="button" class="btn btn-secondary" id="cpbFixDollar">＋ 补全 $</button>
+      <button type="button" class="btn btn-secondary" id="cpbStop" disabled>⏹ 停止</button>
+      <button type="button" class="btn btn-danger" id="cpbPrune" disabled>🗑 删除无效节点</button>
+      <button type="button" class="btn btn-secondary" id="cpbRestore" disabled>↩ 回滚删除</button>
+      <button type="button" class="btn btn-primary" id="cpbSaveGlobal" disabled>💾 保存为全局代理</button>
+    </div>
+    <div class="cpb-controls">
+      <label><input type="checkbox" id="cpbPreHost"> 「补全 $」时，纯代理行（无 #）补「当前部署域名 #」前缀</label>
+    </div>
+    <div id="cpbMsg" class="cpb-msg">尚未测试。节点来源＝「自定义优选」文本框（#customIPs）里带 <code>$proto://</code> 或裸 <code>proto://</code> 的链式代理行。</div>
+    <div id="cpbList" class="network-cards-container"><div class="cpb-empty">点「批量测链式代理」开始；结果按网络卡片显示：延迟 / 出口IP / 国家地区 / 状态；可用节点可勾选作全局代理。</div></div>
+    <div class="cpb-note">全局切换：在下述结果卡里<b>勾选</b>一个「可用」节点（单选），再点「保存为全局代理」→ 写入「Cloudflare CDN 访问设置」同款的 <code>反代.SOCKS5</code>（启用=协议 / 账号 / 全局=true）并生效；其它节点保留不动。</div>
+  </div>
+</div>
+<div id="cpbDollarList" hidden></div>
+<script>
+(function(){
+  "use strict";
+  var $ = function(id){ return document.getElementById(id); };
+  var msg = function(t){ var e=$('cpbMsg'); if(e) e.textContent=t||''; };
+  var locZh = function(code){
+    var m={JP:'日本',HK:'中国·港',TW:'中国·台',SG:'新加坡',MY:'马来西亚',TH:'泰国',ID:'印尼',IN:'印度',KR:'韩国',US:'美国',GB:'英国',DE:'德国',FR:'法国',NL:'荷兰',CA:'加拿大',AU:'澳大利亚',VN:'越南',PH:'菲律宾',LAX:'美西',NRT:'日本',TYO:'日本',KIX:'日本',SIN:'新加坡',HKG:'中国·港',LHR:'伦敦',FRA:'法兰克福',AMS:'阿姆斯特丹',YTO:'多伦多',MAD:'马德里',CPH:'哥本哈根',VIE:'维也纳',DUB:'都柏林',BCN:'巴塞罗那',SVO:'莫斯科',BOM:'孟买',SYD:'悉尼'};
+    var c=String(code||'').toUpperCase(); return m[c]||code||'—';
+  };
+  var CHAIN=/\$?(socks5|http|https|turn|sstp):\/\/([^#\s]+)/i; // $ 可选，容忍裸 proto://
+  var state={rows:[],running:false,aborted:false,snapshot:null,current:null};
+
+  function parseLine(line){
+    var s=String(line); var m=s.match(CHAIN); if(!m) return null;
+    var name=(s.split('#')[0]||'').trim();
+    return {line:s.trim(),name:name,proto:m[1].toLowerCase(),creds:m[2].trim(),result:null};
+  }
+  async function loadListText(){
+    var ta=$('customIPs');
+    if(ta && ta.value && ta.value.trim() && ta.value!=='正在加载...') return ta.value;
+    var r=await fetch('/admin/ADD.txt?_t='+Date.now(),{headers:{'Cache-Control':'no-cache'}});
+    return r.ok ? await r.text() : '';
+  }
+  async function checkOne(node,timeoutMs){
+    var ctrl=new AbortController();
+    var timer=setTimeout(function(){ctrl.abort();},timeoutMs);
+    try{
+      var url='/admin/check?'+node.proto+'='+encodeURIComponent(node.creds)+'&_t='+Date.now();
+      node.result=await (await fetch(url,{signal:ctrl.signal})).json();
+    }catch(e){
+      node.result={success:false,error:(e.name==='AbortError')?'超时':(e.message||'连接失败')};
+    }finally{ clearTimeout(timer); }
+  }
+  function cardEl(node,idx){
+    var r=node.result; var ok=r&&r.success===true;
+    var card=document.createElement('div'); card.className='network-card';
+    var title=document.createElement('div'); title.className='network-card-title';
+    var dot=document.createElement('span'); dot.className='status-indicator';
+    dot.style.background=(r===null)?'var(--text-secondary,#bbb)':(ok?'#22c55e':'#ef4444');
+    var tt=document.createElement('div'); tt.className='title-text';
+    var tm=document.createElement('div'); tm.className='title-main';
+    tm.textContent=(ok&&r.loc?locZh(r.loc):(node.name||node.proto||'未测'));
+    var ts=document.createElement('div'); ts.className='title-subtitle';
+    ts.textContent=node.proto+' · '+(node.name||node.creds);
+    tt.appendChild(tm); tt.appendChild(ts); title.appendChild(dot); title.appendChild(tt); card.appendChild(title);
+    var info=document.createElement('div'); info.className='network-info-content';
+    var ipt=document.createElement('span'); ipt.className='ip-text';
+    ipt.textContent=(r===null)?'未测试':(ok?('延迟 '+(r.responseTime!=null?r.responseTime+'ms':'—')):'不可用');
+    var lc=document.createElement('div'); lc.className='location-text';
+    var ct=document.createElement('span'); ct.className='country-text';
+    if(r===null){ ct.textContent='点批量测'; }
+    else if(ok){ ct.textContent=(locZh(r.loc)+' · 出口IP '+(r.ip||'—')); }
+    else { ct.textContent=(r.error?('失败 · '+r.error):'失败'); }
+    lc.appendChild(ct); info.appendChild(ipt); info.appendChild(lc); card.appendChild(info);
+    if(ok){
+      var foot=document.createElement('div'); foot.className='cpb-node-foot';
+      var lab=document.createElement('label'); lab.className='cpb-pickwrap';
+      var radio=document.createElement('input'); radio.type='radio'; radio.name='cpbPick'; radio.dataset.i=idx;
+      radio.onchange=function(){ $('cpbSaveGlobal').disabled = !document.querySelector('input[name=cpbPick]:checked'); };
+      var txt=document.createElement('span'); txt.textContent='选为全局代理';
+      lab.appendChild(radio); lab.appendChild(txt); foot.appendChild(lab);
+      card.appendChild(foot);
+    }
+    return card;
+  }
+  function render(){
+    var list=$('cpbList'); if(!list) return;
+    list.innerHTML='';
+    if(!state.rows.length){
+      var e=document.createElement('div'); e.className='cpb-empty';
+      e.textContent='点「批量测链式代理」开始；结果按网络卡片显示：延迟 / 出口IP / 国家地区 / 状态；可用节点可勾选作全局代理。';
+      list.appendChild(e);
+    } else {
+      state.rows.forEach(function(n,i){ list.appendChild(cardEl(n,i)); });
+    }
+    var anyFail=state.rows.some(function(n){return n.result&&n.result.success===false;});
+    $('cpbPrune').disabled=!anyFail;
+    $('cpbSaveGlobal').disabled=!document.querySelector('input[name=cpbPick]:checked');
+  }
+  async function run(){
+    if(state.running) return;
+    state.running=true; state.aborted=false;
+    $('cpbRun').disabled=true; $('cpbStop').disabled=false; msg('读取节点列表…');
+    var text='';
+    try{ text=await loadListText(); }
+    catch(e){ msg('读取节点列表失败: '+e.message); state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true; return; }
+    var nodes=text.split(/\r?\n/).map(parseLine).filter(Boolean);
+    if(!nodes.length){ msg('未在 #customIPs 里解析到 proto:// 链式代理节点。'); state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true; render(); return; }
+    state.rows=nodes;
+    var conc=Math.max(1,Math.min(8,parseInt($('cpbConc').value,10)||1));
+    var timeoutMs=Math.max(2000,parseInt($('cpbTo').value,10)||10000);
+    var i=0,done=0;
+    async function worker(){
+      while(i<nodes.length && !state.aborted){
+        var n=nodes[i++]; await checkOne(n,timeoutMs); done++; render(); msg('正在测试 '+done+'/'+nodes.length);
+      }
+    }
+    var pool=[]; for(var k=0;k<conc;k++) pool.push(worker());
+    await Promise.all(pool);
+    state.running=false; $('cpbRun').disabled=false; $('cpbStop').disabled=true;
+    msg(state.aborted?'已停止':'完成'); render();
+  }
+  function stop(){ state.aborted=true; msg('正在停止…'); }
+  async function prune(){
+    var fail=new Set(); state.rows.forEach(function(n){ if(n.result&&n.result.success===false) fail.add(n.line); });
+    if(!fail.size){ msg('没有可删除的失效节点'); return; }
+    if(!confirm('将删除 '+fail.size+' 个失效链式代理行（普通优选行保留），确定？')) return;
+    var text=await loadListText();
+    if(!state.snapshot) state.snapshot=text;
+    var kept=text.split(/\r?\n/).filter(function(l){ var t=l.trim(); if(!t) return true; var p=parseLine(t); return !(p&&fail.has(t)); });
+    var newtext=kept.join('\n');
+    var r=await fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:newtext});
+    if(r.ok){ msg('已删除 '+fail.size+' 个失效节点'); $('cpbRestore').disabled=false; if($('customIPs')) $('customIPs').value=newtext; render(); }
+    else msg('删除失败: '+(r.status));
+  }
+  async function restore(){
+    if(!state.snapshot){ msg('无可回滚快照'); return; }
+    var r=await fetch('/admin/ADD.txt',{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:state.snapshot});
+    if(r.ok){ msg('已回滚到删除前'); if($('customIPs')) $('customIPs').value=state.snapshot; }
+    else msg('回滚失败: '+(r.status));
+  }
+  // 勾选节点 -> 保存为全局代理：写 反代.SOCKS5(启用=协议,账号,全局=true)，不碰其它
+  async function saveGlobal(){
+    var r=document.querySelector('input[name=cpbPick]:checked');
+    if(!r){ msg('请先勾选一个「可用」节点'); return; }
+    var node=state.rows[+r.dataset.i];
+    try{
+      var cfg=await (await fetch('/admin/config.json?_t='+Date.now())).json();
+      cfg['反代']=cfg['反代']||{};
+      cfg['反代']['SOCKS5']=cfg['反代']['SOCKS5']||{};
+      var s=cfg['反代']['SOCKS5'];
+      s['启用']=node.proto; s['账号']=node.creds; s['全局']=true;
+      state.current=node.line;
+      var resp=await fetch('/admin/config.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+      if(resp.ok){ msg('已保存并生效：全局代理 = '+(node.name||node.creds)); render(); }
+      else msg('保存失败: '+(resp.status));
+    }catch(e){ msg('保存失败: '+e.message); }
+  }
+  // 补全 $：给每个缺 $ 的 proto:// 前补 $（去紧邻空格）；可选再补运行时部署域名前缀（不写死进 pages）
+  function fixDollar(){
+    var ta=$('customIPs'); if(!ta){ msg('未找到 #customIPs 文本框'); return; }
+    var preHost=$('cpbPreHost').checked ? (String(window.location.hostname||'').trim()+'#') : '';
+    var lines=ta.value.split(/\r?\n/), fixed=0;
+    var out=lines.map(function(l){
+      if(!l.trim()) return l;
+      var t=l.replace(/ ?(?<!\$)(https|http|socks5|turn|sstp):\/\//gi, function(m,p){ return '$'+p+'://'; });
+      if(preHost && t.indexOf('#')<0 && /\$?(https|http|socks5|turn|sstp):\/\//i.test(t)){ t=preHost+t; }
+      if(t!==l) fixed++;
+      return t;
+    });
+    if(!fixed){ msg('没有需要补全 $ 的行'); return; }
+    ta.value=out.join('\n');
+    try{ ta.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+    if(typeof markModified==='function'){ try{ markModified('sub'); }catch(e){} }
+    msg('已补全 '+fixed+' 行 → $proto://'+(preHost?('（纯代理行已加当前部署域名 # 前缀 '+preHost.slice(0,-1)+'#」)'):''));
+  }
+  // $ 输入自动补全：#customIPs 里打 $ 时弹 5 种协议
+  (function initDollar(){
+    var ta=$('customIPs'); if(!ta) return;
+    var list=$('cpbDollarList'); var pro=['socks5','http','https','turn','sstp'];
+    var sel=0,items=[];
+    function ctx(){
+      var pos=ta.selectionStart; if(pos==null) return null;
+      var seg=ta.value.slice(0,pos).split('\n').pop();
+      var m=/\$([a-zA-Z]{0,6})$/.exec(seg);
+      if(!m) return null;
+      return {pos:pos,seg:seg,prefix:m[1].toLowerCase(),dollarOff:seg.length-m[0].length};
+    }
+    function show(){
+      var c=ctx(); if(!c){ hide(); return; }
+      items=pro.filter(function(p){ return p.indexOf(c.prefix)===0; });
+      if(!items.length){ hide(); return; }
+      sel=0; list.innerHTML='';
+      items.forEach(function(p,i){
+        var d=document.createElement('div'); d.className='cpb-dollar-item'+(i===0?' cpb-dollar-sel':''); d.textContent='$'+p+'://';
+        d.onmouseenter=function(){ sel=i; refreshSel(); };
+        d.onclick=function(e){ e.stopPropagation(); complete(p); };
+        list.appendChild(d);
+      });
+      var r=ta.getBoundingClientRect();
+      list.style.left=Math.max(8,r.left)+'px'; list.style.top=(r.bottom+2)+'px';
+      list.hidden=false;
+    }
+    function hide(){ list.hidden=true; items=[]; }
+    function refreshSel(){ Array.prototype.forEach.call(list.children,function(c2,i){ c2.classList.toggle('cpb-dollar-sel',i===sel); }); }
+    function complete(p){
+      var c=ctx(); if(!c) return;
+      var absDollar=c.pos-c.seg.length+c.dollarOff;
+      var ins='$'+p+'://';
+      ta.value=ta.value.slice(0,absDollar)+ins+ta.value.slice(c.pos);
+      ta.selectionStart=ta.selectionEnd=absDollar+ins.length;
+      hide();
+      try{ ta.dispatchEvent(new Event('input',{bubbles:true})); }catch(e){}
+      if(typeof markModified==='function'){ try{ markModified('sub'); }catch(e){} }
+      ta.focus();
+    }
+    ta.addEventListener('input',show);
+    ta.addEventListener('click',show);
+    ta.addEventListener('keyup',function(e){
+      if(e.key==='Escape') hide();
+      else if(e.key==='ArrowDown'){ show(); sel=Math.min(items.length-1,sel+1); refreshSel(); e.preventDefault(); }
+      else if(e.key==='ArrowUp'){ show(); sel=Math.max(0,sel-1); refreshSel(); e.preventDefault(); }
+      else if((e.key==='Enter'||e.key==='Tab') && !list.hidden){ complete(items[sel]); e.preventDefault(); }
+      else show();
+    });
+    document.addEventListener('click',function(e){ if(!list.contains(e.target) && e.target!==ta) hide(); });
+  })();
+
+  $('cpbRun').onclick=run;
+  $('cpbStop').onclick=stop;
+  $('cpbPrune').onclick=prune;
+  $('cpbRestore').onclick=restore;
+  $('cpbSaveGlobal').onclick=saveGlobal;
+  $('cpbFixDollar').onclick=fixDollar;
+  render();
+})();
+</script>
 
 <!-- 模块3: 详细配置信息 -->
 			<div class="module collapsed advanced-module mode-always-visible">
