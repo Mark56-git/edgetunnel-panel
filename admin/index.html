@@ -10565,17 +10565,17 @@
 			</div>
 
 			<!-- ============================================================
-  链式代理批量测试模块 (cpb) v4 — 原生 .module 卡片，唯一一份
-  插入位置：.card-container 内、“模块3: 详细配置信息”注释之前
+  链式代理批量测试模块 (cpb) v5 — 原生 .module 卡片，唯一一份
   功能：批量测(admin/check)+实时进度/逐卡刷新 · 自动删无效(回写+回滚)
-        勾选节点保存为全局代理 · 补全(可选 补格式/只补$ + 补域名) · $ 输入自动补全
-  自动测试默认关。补全默认：补格式=开、补域名=开(用运行时 window.location.hostname)。
+        勾选节点保存为全局代理 · 补全(可选 补格式/只补$ + 补域名 + 从第N行)
+        测试结果 本地自动保存(刷新可恢复) + 导出JSON + 导入JSON(继续用)
+        $ 输入自动补全。  自动测试默认关。
   复用面板类名，仅用现有 worker 端点，后端 0 改。
 ============================================================ -->
 <style>
 #cpbModule .cpb-controls{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin:2px 0 10px;font-size:13px;color:var(--text-secondary,#555)}
 #cpbModule .cpb-controls label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
-#cpbModule .cpb-controls input[type=number]{width:56px;padding:4px 7px;border:1px solid var(--border-color,#d0d0d0);border-radius:8px;background:var(--input-bg,#fff);color:var(--text-primary,#111)}
+#cpbModule .cpb-controls input[type=number]{width:54px;padding:4px 7px;border:1px solid var(--border-color,#d0d0d0);border-radius:8px;background:var(--input-bg,#fff);color:var(--text-primary,#111)}
 #cpbModule .cpb-controls select{padding:3px 6px;border:1px solid var(--border-color,#d0d0d0);border-radius:8px;background:var(--input-bg,#fff);color:var(--text-primary,#111);font-size:12px}
 #cpbModule .cpb-fixopts{font-size:12px;color:var(--text-secondary,#777)}
 #cpbModule .cpb-progress{margin:2px 0 8px}
@@ -10583,6 +10583,7 @@
 #cpbModule .cpb-bar{height:100%;width:0;background:#2f9e44;transition:width .15s}
 #cpbModule .cpb-bar.stop{background:#f59f00}
 #cpbModule .cpb-barText{font-size:12px;color:var(--text-secondary,#888);margin-top:4px}
+#cpbModule .cpb-saved{font-size:12px;color:var(--text-secondary,#8a8a8a);margin-top:4px}
 #cpbModule .cpb-msg{font-size:13px;color:var(--text-secondary,#888);min-height:18px;margin:0 0 8px;line-height:1.55}
 #cpbModule .cpb-node-foot{margin-top:10px;display:flex;align-items:center;gap:10px}
 #cpbModule .cpb-pickwrap{display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;color:var(--text-secondary,#555)}
@@ -10616,21 +10617,26 @@
       <button type="button" class="btn btn-danger" id="cpbPrune" disabled>🗑 删无效</button>
       <button type="button" class="btn btn-secondary" id="cpbRestore" disabled>↩ 回滚</button>
       <button type="button" class="btn btn-primary" id="cpbSaveGlobal" disabled>💾 保存为全局</button>
+      <button type="button" class="btn btn-secondary" id="cpbExport">📥 导出结果</button>
+      <button type="button" class="btn btn-secondary" id="cpbImport">📤 导入结果</button>
     </div>
     <div class="cpb-controls cpb-fixopts">
       <span>补全选项：</span>
       <label>协议 <select id="cpbFixProto"><option value="sstp">sstp</option><option value="socks5">socks5</option><option value="http">http</option><option value="https">https</option><option value="turn">turn</option></select></label>
       <label><input type="checkbox" id="cpbFixProtoPre" checked> 补 协议:// 格式</label>
       <label><input type="checkbox" id="cpbFixDomain" checked> 补 优选域名</label>
-      <span style="opacity:.7">不勾“补格式”＝只补 $ 符号；“补域名”用当前部署域名</span>
+      <label>从第 <input type="number" id="cpbFixFrom" value="1" min="1"> 行起补全</label>
+      <span style="opacity:.7">不勾“补格式”＝只补 $ 符号；“补域名”用当前部署域名；“从第 N 行”= 只补 N 行及以后</span>
     </div>
     <div class="cpb-progress">
       <div class="cpb-barwrap"><div class="cpb-bar" id="cpbBar"></div></div>
       <div class="cpb-barText" id="cpbBarText">尚未测试</div>
+      <div class="cpb-saved" id="cpbSaved"></div>
     </div>
-    <div id="cpbMsg" class="cpb-msg">节点来源＝「自定义优选」(#customIPs) 里带 $proto:// 或裸 proto:// 的行。点「批量测」即时刷新，或勾「自动测试」自动跑。</div>
-    <div id="cpbList" class="network-cards-container"><div class="cpb-empty">暂无结果。点「批量测」或勾「自动测试」后，这里逐个实时刷新：延迟 / 出口IP / 国家地区 / 状态。</div></div>
-    <div class="cpb-note">全局切换：在结果卡里<b>勾选</b>一个「可用」节点（单选）→ 点「保存为全局」，写入「Cloudflare CDN 访问设置」同款 反代.SOCKS5 配置并生效，其它节点保留。</div>
+    <div id="cpbMsg" class="cpb-msg">节点来源＝「自定义优选」(#customIPs) 里带 $proto:// 或裸 proto:// 的行。点「批量测」即时刷新，或勾「自动测试」自动跑；结果自动保存、可导出/导入 JSON 继续用。</div>
+    <div id="cpbList" class="network-cards-container"><div class="cpb-empty">暂无结果。点「批量测」或「导入结果」后，这里逐个实时刷新：延迟 / 出口IP / 国家地区 / 状态。</div></div>
+    <div class="cpb-note">全局切换：在结果卡里<b>勾选</b>一个「可用」节点（单选）→ 点「保存为全局」，写入「Cloudflare CDN 访问设置」同款 反代.SOCKS5 配置并生效。结果会<b>自动保存</b>到本浏览器（刷新仍在），也可<b>导出 JSON</b> 到别处、再<b>导入</b> 继续使用。</div>
+    <input type="file" id="cpbImportFile" accept=".json,application/json" hidden>
   </div>
 </div>
 <div id="cpbDollarList" hidden></div>
@@ -10639,8 +10645,10 @@
   "use strict";
   var $=function(id){return document.getElementById(id);};
   var msg=function(t){var e=$('cpbMsg');if(e)e.textContent=t||'';};
+  var savedEl=function(){return $('cpbSaved');};
   function locZh(code){var m={JP:'日本',HK:'港',TW:'台',SG:'新加坡',MY:'马来西亚',TH:'泰国',ID:'印尼',IN:'印度',KR:'韩国',US:'美国',GB:'英国',DE:'德国',FR:'法国',NL:'荷兰',CA:'加拿大',AU:'澳大利亚',VN:'越南',PH:'菲律宾',LAX:'美西',NRT:'日本',SIN:'新加坡',HKG:'港',LHR:'伦敦',FRA:'法兰克福',YTO:'多伦多',MAD:'马德里',SYD:'悉尼',BOM:'孟买',CPH:'哥本哈根',VIE:'维也纳',SVO:'莫斯科'};var c=String(code||'').toUpperCase();return m[c]||code||'—';}
   var CHAIN=/\$?(socks5|http|https|turn|sstp):\/\/([^#\s]+)/i;
+  var LSK='cpbResults';
   var state={rows:[],cardEls:[],running:false,aborted:false,snapshot:null};
 
   function parseLine(line){var s=String(line);var m=s.match(CHAIN);if(!m)return null;var name=(s.split('#')[0]||'').trim();return{line:s.trim(),name:name,proto:m[1].toLowerCase(),creds:m[2].trim(),result:null,phase:'idle'};}
@@ -10668,7 +10676,7 @@
     var ct=card.querySelector('.country-text');if(ct){if(n.phase==='idle'||n.phase==='testing'){ct.textContent='';}else if(ok){ct.textContent=(locZh(r.loc)+' · 出口IP '+(r.ip||'—'));}else{ct.textContent=(r.error?('失败 · '+r.error):'失败');}}
     var foot=card.querySelector('.cpb-node-foot');if(foot){foot.style.display=ok?'flex':'none';if(foot.querySelector('input[name=cpbPick]')===null){var lab=document.createElement('label');lab.className='cpb-pickwrap';var radio=document.createElement('input');radio.type='radio';radio.name='cpbPick';radio.dataset.i=String(i);radio.onchange=function(){updateGlobalBtn();};var sp=document.createElement('span');sp.textContent='选为全局';lab.appendChild(radio);lab.appendChild(sp);foot.appendChild(lab);}}
   }
-  function renderList(){var list=$('cpbList');if(!list)return;list.innerHTML='';state.cardEls=[];if(!state.rows.length){var e=document.createElement('div');e.className='cpb-empty';e.textContent='暂无结果。点「批量测」或勾「自动测试」后，这里逐个实时刷新：延迟 / 出口IP / 国家地区 / 状态。';list.appendChild(e);}else{state.rows.forEach(function(n,i){var c=makeCard(i);list.appendChild(c);state.cardEls[i]=c;paintCard(i);});}updateGlobalBtn();}
+  function renderList(){var list=$('cpbList');if(!list)return;list.innerHTML='';state.cardEls=[];if(!state.rows.length){var e=document.createElement('div');e.className='cpb-empty';e.textContent='暂无结果。点「批量测」或「导入结果」后，这里逐个实时刷新：延迟 / 出口IP / 国家地区 / 状态。';list.appendChild(e);}else{state.rows.forEach(function(n,i){var c=makeCard(i);list.appendChild(c);state.cardEls[i]=c;paintCard(i);});}updateGlobalBtn();}
   function updateGlobalBtn(){var on=!!document.querySelector('input[name=cpbPick]:checked');if($('cpbSaveGlobal'))$('cpbSaveGlobal').disabled=!on;var fail=state.rows.some(function(n){return n.result&&n.result.success===false;});if($('cpbPrune'))$('cpbPrune').disabled=!fail;}
   function countOk(){return state.rows.filter(function(n){return n.result&&n.result.success===true;}).length;}
   function countFail(){return state.rows.filter(function(n){return n.result&&n.result.success===false;}).length;}
@@ -10698,7 +10706,7 @@
     var pool=[];for(var k=0;k<conc;k++)pool.push(worker());
     await Promise.all(pool);
     state.running=false;if($('cpbRun'))$('cpbRun').disabled=false;if($('cpbStop'))$('cpbStop').disabled=true;
-    setProgress(done,total,false,state.aborted);msg(state.aborted?'已停止':'完成。');updateGlobalBtn();
+    setProgress(done,total,false,state.aborted);msg(state.aborted?'已停止':'完成。已自动保存结果。');updateGlobalBtn();saveLocal();
   }
   function stop(){state.aborted=true;}
 
@@ -10717,17 +10725,17 @@
     fetch('/admin/config.json?_t='+Date.now()).then(function(x){return x.json();}).then(function(cfg){cfg['反代']=cfg['反代']||{};cfg['反代']['SOCKS5']=cfg['反代']['SOCKS5']||{};var s=cfg['反代']['SOCKS5'];s['启用']=node.proto;s['账号']=node.creds;s['全局']=true;return fetch('/admin/config.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});}).then(function(resp){if(resp.ok){msg('已保存并生效：全局代理 = '+(node.name||node.creds));}else{msg('保存失败: '+resp.status);}}).catch(function(e){msg('保存失败: '+e.message);});
   }
 
-  // 补全：域名(# 前缀，用运行时部署域名) + $ + 可选 协议://  + 凭证
   function fixAll(){var ta=$('customIPs');if(!ta){msg('未找到 #customIPs');return;}
     var P=($('cpbFixProto')?$('cpbFixProto').value:'sstp');
     var addProto=!!($('cpbFixProtoPre')&&$('cpbFixProtoPre').checked);
     var addDomain=!!($('cpbFixDomain')&&$('cpbFixDomain').checked);
+    var fromN=parseInt($('cpbFixFrom').value,10)||1;if(fromN<1)fromN=1;
     var host=window.location.hostname||'';
     var lines=ta.value.split(/\r?\n/),fixed=0;
-    var out=lines.map(function(l){var t=l.trim();if(!t)return l;
+    var out=lines.map(function(l,idx){if(idx<fromN-1)return l;var t=l.trim();if(!t)return l;
       var m=t.match(/(https|http|socks5|turn|sstp):\/\//i);
       var hasProto=!!m;var proto=hasProto?m[1].toLowerCase():(addProto?P:null);
-      if(!proto)return l; // 裸凭证且未勾“补格式” → 只补$ 也无处补，保持不变
+      if(!proto)return l;
       var creds,head;
       if(hasProto){creds=t.slice(m.index+m[0].length);head=t.slice(0,m.index);}else{creds=t;head='';}
       head=head.replace(/[\s$]+$/,'');
@@ -10736,15 +10744,37 @@
       if(!addr&&addDomain)addr=host;
       var r2='';if(addr)r2+=addr;r2+='#';if(remark)r2+=remark;r2+='$'+proto+'://'+creds;
       if(r2!==t)fixed++;return r2;});
-    if(!fixed){msg('没有需要补全的行');return;}
+    if(!fixed){msg('第 '+fromN+' 行起没有需要补全的行');return;}
     ta.value=out.join('\n');
     try{ta.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}
     if(typeof markModified==='function'){try{markModified('sub');}catch(e){}}
-    msg('已补全 '+fixed+' 行（优选域名='+(host||'未取到，仅补 $/协议')+'）');
+    msg('已补全 '+fixed+' 行（从第 '+fromN+' 行起，优选域名='+(host||'未取到，仅补 $/协议')+'）');
     if($('cpbAuto')&&$('cpbAuto').checked&&!state.running)run();
   }
 
-  // $ 输入自动补全（#customIPs 里打 $ 时弹 5 协议）
+  // 结果保存：本地自动存(localStorage)，刷新可恢复；导出/导入 JSON 可跨机使用
+  function collectItems(){return state.rows.filter(function(n){return n.result;}).map(function(n){var r=n.result;return{line:n.line,name:n.name,proto:n.proto,creds:n.creds,success:!!r.success,latency:r.responseTime!=null?r.responseTime:null,ip:r.ip||'',loc:r.loc||'',error:r.error||''};});}
+  function saveLocal(){try{localStorage.setItem(LSK,JSON.stringify({ts:Date.now(),items:collectItems()}));}catch(e){}var s=savedEl();if(s)s.textContent='已自动保存 '+collectItems().length+' 条（'+new Date().toLocaleTimeString()+'）；刷新仍可见，可导出/导入。';}
+  function loadLocal(){try{var raw=localStorage.getItem(LSK);if(!raw)return false;var d=JSON.parse(raw);if(!d||!d.items||!d.items.length)return false;applyItems(d.items,true);return true;}catch(e){return false;}}
+  function applyItems(items,isStale){state.rows=items.map(function(o){return{line:o.line||'',name:o.name||'',proto:o.proto||'sstp',creds:o.creds||'',result:{success:!!o.success,ip:o.ip||'',loc:o.loc||'',responseTime:o.latency,error:o.error||''},phase:(o.success?'done':'fail')};});renderList();}
+  function exportResults(){var items=collectItems();if(!items.length){msg('没有结果可导出');return;}
+    var payload={app:'edgetunnel-cpb',ts:Date.now(),results:items};
+    var blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
+    var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download='cpb-results-'+new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')+'.json';
+    document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(a.href);a.remove();},1000);
+    msg('已导出 '+items.length+' 条结果（JSON，可再导入继续用）');
+  }
+  function importResults(){var fi=$('cpbImportFile');if(!fi)return;fi.value='';fi.click();
+    fi.onchange=function(){var f=fi.files&&fi.files[0];if(!f)return;
+      f.text().then(function(txt){var d=JSON.parse(txt);var items=(d&&d.results)?d.results:(Array.isArray(d)?d:null);
+        if(!items||!items.length)throw new Error('empty');
+        applyItems(items);msg('已导入 '+items.length+' 条结果，可「保存为全局」/「删无效」/重新「批量测」。');saveLocal();
+      }).catch(function(e){msg('导入失败：文件格式不对（需为本模块导出的 JSON）');});
+    };
+  }
+
+  // $ 输入自动补全
   (function initDollar(){
     var ta=$('customIPs');if(!ta)return;var list=$('cpbDollarList');if(!list)return;
     var pro=['socks5','http','https','turn','sstp'];var sel=0,items=[];
@@ -10767,8 +10797,12 @@
   if($('cpbRestore'))$('cpbRestore').onclick=restore;
   if($('cpbSaveGlobal'))$('cpbSaveGlobal').onclick=saveGlobal;
   if($('cpbFix'))$('cpbFix').onclick=fixAll;
+  if($('cpbExport'))$('cpbExport').onclick=exportResults;
+  if($('cpbImport'))$('cpbImport').onclick=importResults;
   if($('cpbAuto'))$('cpbAuto').onchange=function(){if(this.checked&&!state.running)run();};
+  // 初始化：恢复本地保存的结果
   renderList();
+  if(loadLocal()){var s=savedEl();if(s)s.textContent='已恢复上次保存的结果（'+new Date().toLocaleString()+'）；可导出/导入/重新测。';}
 })();
 </script>
 
